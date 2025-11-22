@@ -2,16 +2,12 @@ import { useState, useEffect } from 'react';
 import { createDID, requestPolicy, issueCredential, getPolicyRequests } from './api';
 import ConnectWallet from './ConnectWallet';
 import QRCode from 'qrcode';
-import { storeDID, getDID } from './did-storage';
 
 function PatientDashboard() {
   const [did, setDid] = useState(null);
   const [wallet, setWallet] = useState(null);
   const [coverageAmount, setCoverageAmount] = useState('');
-  const [premium, setPremium] = useState('');
-  const [duration, setDuration] = useState('');
-  const [coverageType, setCoverageType] = useState('');
-  const [deductible, setDeductible] = useState('');
+  const [details, setDetails] = useState('');
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState(null);
   const [vcForm, setVcForm] = useState({ fullName: '', notes: '' });
@@ -22,28 +18,16 @@ function PatientDashboard() {
   const [showVCSection, setShowVCSection] = useState(false);
   const [showDisconnectPopup, setShowDisconnectPopup] = useState(false);
   const [prevWalletState, setPrevWalletState] = useState(null);
+  const [jsonError, setJsonError] = useState(null);
 
   // Monitor wallet disconnection
   useEffect(() => {
     if (prevWalletState?.account && !wallet?.account) {
       // Wallet was connected but now disconnected
       setShowDisconnectPopup(true);
-      setDid(null); // Clear DID when wallet disconnects
     }
     setPrevWalletState(wallet);
   }, [wallet, prevWalletState]);
-
-  // Auto-retrieve DID when wallet connects
-  useEffect(() => {
-    if (wallet?.account && !did) {
-      const storedDID = getDID(wallet.account, 'patient');
-      if (storedDID) {
-        setDid(storedDID);
-        // Only show message if we successfully retrieved a DID
-        setMessage({ type: 'success', text: 'DID automatically retrieved for this wallet!' });
-      }
-    }
-  }, [wallet?.account]);
 
   // Load policy requests
   useEffect(() => {
@@ -92,11 +76,6 @@ function PatientDashboard() {
   };
 
   const handleCreateDID = async () => {
-    if (!wallet?.account) {
-      setMessage({ type: 'error', text: 'Please connect wallet first' });
-      return;
-    }
-
     setLoading(true);
     setMessage(null);
     try {
@@ -105,8 +84,6 @@ function PatientDashboard() {
       console.log('DID creation result:', result);
       if (result && result.success) {
         setDid(result.did);
-        // Store DID in localStorage with wallet address
-        storeDID(wallet.account, 'patient', result.did);
         setMessage({ type: 'success', text: 'DID created successfully!' });
       } else {
         setMessage({ type: 'error', text: result?.error || 'Failed to create DID' });
@@ -127,13 +104,41 @@ function PatientDashboard() {
       return;
     }
 
-    // Build details object from form fields
-    const parsedDetails = {
-      premium: premium || '',
-      duration: duration || '',
-      coverageType: coverageType || '',
-      deductible: deductible || '',
-    };
+    // Validate and parse JSON details if provided
+    let parsedDetails = {};
+    const trimmedDetails = details ? details.trim() : '';
+    
+    // Only parse if there's actual content
+    if (trimmedDetails) {
+      // Check if there's already a JSON error from real-time validation
+      if (jsonError) {
+        setMessage({ 
+          type: 'error', 
+          text: 'Please fix the JSON format in Additional Details or leave it empty.' 
+        });
+        return;
+      }
+      
+      try {
+        // Try to parse as JSON
+        parsedDetails = JSON.parse(trimmedDetails);
+        // Ensure it's an object (not array, string, number, etc.)
+        if (typeof parsedDetails !== 'object' || Array.isArray(parsedDetails) || parsedDetails === null) {
+          setMessage({ 
+            type: 'error', 
+            text: 'Additional Details must be a valid JSON object (e.g., {"key": "value"}). Leave empty if not needed.' 
+          });
+          return;
+        }
+      } catch (jsonError) {
+        setMessage({ 
+          type: 'error', 
+          text: 'Invalid JSON format. Please enter a valid JSON object like {"premium": "100"} or leave the field empty.' 
+        });
+        return;
+      }
+    }
+    // If empty or whitespace, parsedDetails remains {} which is correct
 
     setLoading(true);
     setMessage(null);
@@ -148,10 +153,7 @@ function PatientDashboard() {
       if (result.success) {
         setMessage({ type: 'success', text: 'Policy request submitted successfully! Waiting for insurer to issue verifiable credential...' });
         setCoverageAmount('');
-        setPremium('');
-        setDuration('');
-        setCoverageType('');
-        setDeductible('');
+        setDetails('');
         setShowVCSection(true); // Show VC section (will be empty until insurer issues)
         loadPolicyRequests(); // Refresh policy requests
         // Check for existing VC for this policy request
@@ -295,72 +297,72 @@ function PatientDashboard() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="label">
-                Premium <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                value={premium}
-                onChange={(e) => setPremium(e.target.value)}
-                placeholder="e.g., 100"
-                className="input-field"
-                required
-              />
-            </div>
-
-            <div>
-              <label className="label">
-                Duration (months) <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                value={duration}
-                onChange={(e) => setDuration(e.target.value)}
-                placeholder="e.g., 12"
-                className="input-field"
-                required
-              />
-            </div>
-
-            <div>
-              <label className="label">
-                Coverage Type <span className="text-red-500">*</span>
-              </label>
-              <select
-                value={coverageType}
-                onChange={(e) => setCoverageType(e.target.value)}
-                className="input-field"
-                required
-              >
-                <option value="">Select coverage type</option>
-                <option value="comprehensive">Comprehensive</option>
-                <option value="basic">Basic</option>
-                <option value="premium">Premium</option>
-                <option value="standard">Standard</option>
-              </select>
-            </div>
-
-            <div>
-              <label className="label">
-                Deductible <span className="text-red-500">*</span>
-              </label>
-              <input
-                type="text"
-                value={deductible}
-                onChange={(e) => setDeductible(e.target.value)}
-                placeholder="e.g., 500"
-                className="input-field"
-                required
-              />
+          <div>
+            <label className="label">Additional Details (JSON - Optional)</label>
+            <textarea
+              value={details}
+              onChange={(e) => {
+                const value = e.target.value;
+                setDetails(value);
+                
+                // Real-time JSON validation
+                const trimmed = value.trim();
+                if (trimmed === '') {
+                  setJsonError(null);
+                  if (message?.type === 'error' && message.text?.includes('JSON')) {
+                    setMessage(null);
+                  }
+                } else {
+                  try {
+                    const parsed = JSON.parse(trimmed);
+                    if (typeof parsed !== 'object' || Array.isArray(parsed) || parsed === null) {
+                      setJsonError('Must be a JSON object (e.g., {"key": "value"})');
+                    } else {
+                      setJsonError(null);
+                      if (message?.type === 'error' && message.text?.includes('JSON')) {
+                        setMessage(null);
+                      }
+                    }
+                  } catch (err) {
+                    setJsonError('Invalid JSON format');
+                    if (message?.type === 'error' && message.text?.includes('JSON')) {
+                      setMessage(null);
+                    }
+                  }
+                }
+              }}
+              placeholder='{"premium": "100", "duration": "12", "coverageType": "comprehensive"}'
+              rows="5"
+              className={`input-field resize-none font-mono text-sm ${jsonError ? 'border-red-300 focus:border-red-500 focus:ring-red-500' : ''}`}
+            />
+            {jsonError && (
+              <div className="mt-1 text-xs text-red-600 flex items-center space-x-1">
+                <span>⚠️</span>
+                <span>{jsonError}. Please fix or leave empty.</span>
+              </div>
+            )}
+            <div className="mt-2 space-y-1">
+              <p className="text-xs text-gray-500">
+                <strong>Example JSON format:</strong>
+              </p>
+              <pre className="text-xs bg-gray-100 p-2 rounded border border-gray-200 overflow-x-auto">
+{`{
+  "premium": "100",
+  "duration": "12",
+  "coverageType": "comprehensive",
+  "deductible": "500"
+}`}
+              </pre>
+              <p className="text-xs text-gray-400 mt-1">
+                💡 Leave empty if you don't need additional details
+              </p>
             </div>
           </div>
 
           <button
             type="submit"
             className="btn btn-success w-full sm:w-auto"
-            disabled={loading || !did || !wallet?.account}
+            disabled={loading || !did || !wallet?.account || !!jsonError}
           >
             {loading ? (
               <span className="flex items-center">
@@ -509,33 +511,10 @@ function PatientDashboard() {
                 </div>
                 {request.details && Object.keys(request.details).length > 0 && (
                   <div className="mt-3 pt-3 border-t border-gray-200">
-                    <span className="text-gray-600 text-sm font-semibold mb-2 block">Policy Details:</span>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-sm">
-                      {request.details.premium && (
-                        <div>
-                          <span className="text-gray-600">Premium:</span>
-                          <p className="font-medium text-gray-800">{request.details.premium}</p>
-                        </div>
-                      )}
-                      {request.details.duration && (
-                        <div>
-                          <span className="text-gray-600">Duration:</span>
-                          <p className="font-medium text-gray-800">{request.details.duration} months</p>
-                        </div>
-                      )}
-                      {request.details.coverageType && (
-                        <div>
-                          <span className="text-gray-600">Coverage Type:</span>
-                          <p className="font-medium text-gray-800 capitalize">{request.details.coverageType}</p>
-                        </div>
-                      )}
-                      {request.details.deductible && (
-                        <div>
-                          <span className="text-gray-600">Deductible:</span>
-                          <p className="font-medium text-gray-800">{request.details.deductible}</p>
-                        </div>
-                      )}
-                    </div>
+                    <span className="text-gray-600 text-sm">Additional Details:</span>
+                    <pre className="text-xs bg-white p-2 rounded mt-1 overflow-x-auto">
+                      {JSON.stringify(request.details, null, 2)}
+                    </pre>
                   </div>
                 )}
               </div>

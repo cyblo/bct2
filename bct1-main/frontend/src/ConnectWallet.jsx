@@ -8,11 +8,6 @@ function ConnectWallet({ onWalletConnected }) {
 
   useEffect(() => {
     checkConnection();
-    
-    // Disconnect wallet when component unmounts (page change)
-    return () => {
-      disconnectWallet();
-    };
   }, []);
 
   const checkConnection = async () => {

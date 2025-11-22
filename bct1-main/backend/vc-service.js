@@ -76,18 +76,12 @@ export async function issueVC(credential, issuerDid) {
     // Store VC
     const store = loadVCStore();
     const vcId = credential.id || `vc-${Date.now()}`;
-    const policyId = credential.credentialSubject?.policyId;
     store[vcId] = {
       vc: verifiableCredential,
-      policyId: policyId,
+      policyId: credential.credentialSubject?.policyId,
       createdAt: new Date().toISOString(),
     };
     saveVCStore(store);
-
-    // Update policy request status to approved when VC is issued
-    if (policyId) {
-      updatePolicyRequest(policyId, { status: 'approved' });
-    }
 
     // Upload to IPFS (optional)
     let ipfsCid = null;

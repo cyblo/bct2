@@ -112,53 +112,26 @@ app.get('/vc/policy/:policyId', async (req, res) => {
   }
 });
 
-// --- DID Verification ------------------------------------
-app.get('/verification/did', async (req, res) => {
+// --- File Upload --------------------------------------------
+app.post('/file/upload', async (req, res) => {
   try {
-    const { did } = req.query;
-    if (!did) {
-      return res.status(400).json({
-        success: false,
-        verified: false,
-        reason: 'DID parameter is required',
-      });
+    const { data, filename } = req.body;
+    if (!data) {
+      return res.status(400).json({ success: false, error: 'File data is required' });
     }
 
-    // Import Veramo agent
-    const getVeramoAgent = (await import('./veramo-setup.js')).default;
-    const agent = await getVeramoAgent();
+    const { uploadToIPFS } = await import('./ipfs-service.js');
+    
+    // Convert base64 to buffer
+    const buffer = Buffer.from(data, 'base64');
+    const cid = await uploadToIPFS(buffer);
 
-    try {
-      // Resolve DID document
-      const didDocument = await agent.resolveDid({ didUrl: did });
-      
-      if (didDocument && didDocument.didDocument) {
-        res.json({
-          success: true,
-          verified: true,
-          reason: 'DID document resolved successfully',
-          didDocument: didDocument.didDocument,
-        });
-      } else {
-        res.json({
-          success: true,
-          verified: false,
-          reason: 'DID document not found or invalid',
-        });
-      }
-    } catch (resolveError) {
-      res.json({
-        success: true,
-        verified: false,
-        reason: resolveError.message || 'Failed to resolve DID',
-      });
-    }
+    res.json({ success: true, cid });
   } catch (error) {
-    console.error('DID verification failed:', error);
+    console.error('File upload failed:', error);
     res.status(500).json({
       success: false,
-      verified: false,
-      reason: error.message || 'Verification service error',
+      error: error.message || 'Failed to upload file',
     });
   }
 });

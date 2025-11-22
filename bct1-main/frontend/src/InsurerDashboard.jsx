@@ -1,134 +1,25 @@
 import { useState, useEffect } from 'react';
-import { getPolicyRequests, createDID, issueCredential } from './api';
-import { ethers } from 'ethers';
+import { getPolicyRequests, onchainIssuePolicy, onchainInsurerAction, createDID, issueCredential } from './api';
+import ConnectWallet from './ConnectWallet';
 import QRCode from 'qrcode';
-import { storeDID, getDID } from './did-storage';
-import CollapsibleCard from './components/CollapsibleCard';
-import Toast from './components/Toast';
-import RequestDetailsModal from './components/RequestDetailsModal';
-import IssueVCModal from './components/IssueVCModal';
-import IssuedVCList from './components/IssuedVCList';
-import { weiToEth, formatDate } from './utils/formatting';
 
 function InsurerDashboard() {
   const [wallet, setWallet] = useState(null);
   const [requests, setRequests] = useState([]);
-  const [filteredRequests, setFilteredRequests] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [toast, setToast] = useState(null);
+  const [message, setMessage] = useState(null);
   const [selectedRequest, setSelectedRequest] = useState(null);
-  const [showDetailsModal, setShowDetailsModal] = useState(false);
-  const [showIssueModal, setShowIssueModal] = useState(false);
+  const [createOnchain, setCreateOnchain] = useState(false);
   const [insurerDid, setInsurerDid] = useState(null);
   const [vcForm, setVcForm] = useState({ organization: '', permission: '' });
   const [vcInfo, setVcInfo] = useState(null);
   const [vcQr, setVcQr] = useState('');
-  const [issuedVCs, setIssuedVCs] = useState([]);
-
-  // Filter and sort state
-  const [statusFilter, setStatusFilter] = useState('all');
-  const [sortOption, setSortOption] = useState('newest');
-  const [searchQuery, setSearchQuery] = useState('');
-
-  // Pagination state
-  const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 10;
 
   useEffect(() => {
     loadRequests();
-    loadIssuedVCs();
-    const interval = setInterval(() => {
-      loadRequests();
-      loadIssuedVCs();
-    }, 5000);
+    const interval = setInterval(loadRequests, 5000);
     return () => clearInterval(interval);
   }, []);
-
-  // Auto-retrieve DID when wallet connects
-  useEffect(() => {
-    if (wallet?.account && !insurerDid) {
-      const storedDID = getDID(wallet.account, 'insurer');
-      if (storedDID) {
-        setInsurerDid(storedDID);
-        showToast('Insurer DID automatically retrieved for this wallet!', 'success');
-      }
-    } else if (!wallet?.account) {
-      setInsurerDid(null);
-    }
-  }, [wallet?.account]);
-
-  // Initialize wallet connection
-  useEffect(() => {
-    const initWallet = async () => {
-      if (window.ethereum) {
-        try {
-          const provider = new ethers.BrowserProvider(window.ethereum);
-          const accounts = await provider.listAccounts();
-          if (accounts.length > 0) {
-            const signer = await provider.getSigner();
-            const address = await signer.getAddress();
-            setWallet({ account: address, provider, signer });
-          }
-        } catch (error) {
-          console.error('Error initializing wallet:', error);
-        }
-      }
-    };
-    initWallet();
-
-    // Listen for account changes
-    if (window.ethereum) {
-      window.ethereum.on('accountsChanged', (accounts) => {
-        if (accounts.length === 0) {
-          setWallet(null);
-        } else {
-          initWallet();
-        }
-      });
-    }
-  }, []);
-
-  // Filter and sort requests
-  useEffect(() => {
-    let filtered = [...requests];
-
-    // Filter by status
-    if (statusFilter !== 'all') {
-      filtered = filtered.filter((req) => (req.status || 'pending') === statusFilter);
-    }
-
-    // Search filter
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase();
-      filtered = filtered.filter(
-        (req) =>
-          req.id?.toString().toLowerCase().includes(query) ||
-          req.patientDid?.toLowerCase().includes(query) ||
-          req.patientAddress?.toLowerCase().includes(query)
-      );
-    }
-
-    // Sort
-    filtered.sort((a, b) => {
-      switch (sortOption) {
-        case 'oldest':
-          return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
-        case 'coverage':
-          return BigInt(b.coverageAmount || 0) - BigInt(a.coverageAmount || 0);
-        case 'newest':
-        default:
-          return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
-      }
-    });
-
-    setFilteredRequests(filtered);
-    setCurrentPage(1); // Reset to first page when filters change
-  }, [requests, statusFilter, sortOption, searchQuery]);
-
-  // Update issued VCs when requests change
-  useEffect(() => {
-    loadIssuedVCs();
-  }, [requests]);
 
   const loadRequests = async () => {
     try {
@@ -138,106 +29,101 @@ function InsurerDashboard() {
       }
     } catch (error) {
       console.error('Error loading requests:', error);
-      showToast('Failed to load policy requests', 'error');
     }
   };
 
-  const loadIssuedVCs = async () => {
-    try {
-      // For now, we'll get VCs from policy requests that are approved
-      // In a real implementation, you'd have a dedicated endpoint
-      const approvedRequests = requests.filter(req => (req.status || 'pending') === 'approved');
-      // Map to VC format (this is a placeholder - in real app, fetch from VC store)
-      setIssuedVCs(approvedRequests.map(req => ({
-        id: req.id,
-        patientDid: req.patientDid,
-        policyId: req.id,
-        issuedAt: req.createdAt,
-      })));
-    } catch (error) {
-      console.log('Error loading issued VCs:', error);
-    }
-  };
-
-  const showToast = (message, type = 'success') => {
-    setToast({ message, type });
-  };
-
-  const handleIssueVC = async (data) => {
+  const handleIssueVC = async (request) => {
     if (!wallet?.account) {
-      showToast('Please connect wallet first', 'error');
+      setMessage({ type: 'error', text: 'Please connect wallet first' });
       return;
     }
 
     if (!insurerDid) {
-      showToast('Please create DID first', 'error');
+      setMessage({ type: 'error', text: 'Please create DID first' });
       return;
     }
 
     setLoading(true);
+    setMessage(null);
     try {
       // Generate policy number and valid till date
       const policyNumber = `POLICY-${Date.now().toString().slice(-5)}`;
       const validTill = new Date();
       validTill.setFullYear(validTill.getFullYear() + 1);
       
-      const patientDid = data.patientDid || `did:example:${data.patientWallet}`;
+      // Use the correct API format for policy VC
       const payload = {
         issuerDid: insurerDid,
-        subjectDid: patientDid,
+        subjectDid: request.patientDid || `did:example:${request.patientAddress}`,
         role: 'InsurancePolicy',
         data: {
           credentialType: 'Insurance Policy',
           policyNumber: policyNumber,
-          policyId: data.requestId,
-          issuedTo: patientDid,
+          policyId: request.id,
+          issuedTo: request.patientDid || `did:example:${request.patientAddress}`,
           insurer: wallet.account,
-          beneficiary: data.patientWallet,
-          coverageAmount: data.coverageAmountWei,
-          premium: data.premium,
-          duration: data.durationMonths,
-          deductible: data.deductible,
+          beneficiary: request.patientAddress,
+          coverageAmount: request.coverageAmount,
           validTill: validTill.toISOString().split('T')[0],
           issuedAt: new Date().toISOString(),
-          metadata: data.metadataJson,
         },
       };
 
       const result = await issueCredential(payload);
 
       if (result.success) {
-        showToast('VC issued successfully!', 'success');
-        setShowIssueModal(false);
+        setMessage({
+          type: 'success',
+          text: `VC issued successfully! CID: ${result.cid || 'N/A'}`,
+        });
         loadRequests();
-        loadIssuedVCs();
       } else {
-        showToast(result.error || 'Failed to issue VC', 'error');
+        setMessage({ type: 'error', text: result.error || 'Failed to issue VC' });
       }
     } catch (error) {
-      showToast(error.message || 'Failed to issue VC', 'error');
+      setMessage({ type: 'error', text: error.message || 'Failed to issue VC' });
     } finally {
       setLoading(false);
     }
   };
 
-  const handleVerifyDID = async (did) => {
-    if (!did) {
-      showToast('No DID provided', 'error');
+  const handleIssueVCWithOnchain = async (request, privateKey) => {
+    if (!privateKey) {
+      setMessage({ type: 'error', text: 'Private key required for on-chain operations' });
       return;
     }
 
     setLoading(true);
+    setMessage(null);
     try {
-      const response = await fetch(`http://localhost:3001/verification/did?did=${encodeURIComponent(did)}`);
-      const result = await response.json();
-      
-      if (result.verified) {
-        showToast('✔ DID Verified', 'success');
+      // Issue VC first
+      const payload = {
+        issuerDid: insurerDid,
+        subjectDid: request.patientDid || `did:example:${request.patientAddress}`,
+        role: 'MedicalPolicy',
+        data: {
+          policyId: request.id,
+          insurer: wallet.account,
+          beneficiary: request.patientAddress,
+          coverageAmount: request.coverageAmount,
+          issuedAt: new Date().toISOString(),
+        },
+      };
+
+      const result = await issueCredential(payload);
+
+      if (result.success) {
+        // Note: On-chain policy creation would go here if needed
+        setMessage({
+          type: 'success',
+          text: `VC issued successfully! CID: ${result.cid || 'N/A'}`,
+        });
+        loadRequests();
       } else {
-        showToast(`❌ Verification Failed: ${result.reason || 'Unknown error'}`, 'error');
+        setMessage({ type: 'error', text: result.error || 'Failed to issue VC' });
       }
     } catch (error) {
-      showToast('Failed to verify DID', 'error');
+      setMessage({ type: 'error', text: error.message || 'Failed to issue VC' });
     } finally {
       setLoading(false);
     }
@@ -245,12 +131,12 @@ function InsurerDashboard() {
 
   const handleGenerateInsurerVC = async () => {
     if (!insurerDid) {
-      showToast('Create your insurer DID first', 'error');
+      setMessage({ type: 'error', text: 'Create your insurer DID first' });
       return;
     }
+    setMessage(null);
     setLoading(true);
     try {
-      const { issueCredential } = await import('./api');
       const payload = {
         issuerDid: insurerDid,
         subjectDid: insurerDid,
@@ -265,46 +151,32 @@ function InsurerDashboard() {
       setVcInfo(result.vc);
       const qr = await QRCode.toDataURL(JSON.stringify(result.vc));
       setVcQr(qr);
-      showToast('Insurer credential generated!', 'success');
+      setMessage({ type: 'success', text: 'Insurer credential generated!' });
     } catch (error) {
-      showToast(error.message || 'Failed to generate credential', 'error');
+      setMessage({ type: 'error', text: error.message || 'Failed to generate credential' });
     } finally {
       setLoading(false);
     }
   };
 
-
-  const getStatusBadge = (status) => {
-    const colors = {
-      pending: 'bg-yellow-100 text-yellow-800',
-      approved: 'bg-green-100 text-green-800',
-      rejected: 'bg-red-100 text-red-800',
-    };
-    return (
-      <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${colors[status] || 'bg-gray-100 text-gray-800'}`}>
-        {status?.toUpperCase() || 'UNKNOWN'}
-      </span>
-    );
-  };
-
-  // Pagination
-  const totalPages = Math.ceil(filteredRequests.length / itemsPerPage);
-  const startIndex = (currentPage - 1) * itemsPerPage;
-  const paginatedRequests = filteredRequests.slice(startIndex, startIndex + itemsPerPage);
-
   return (
     <div className="space-y-6 animate-fade-in">
-      {/* Main Header */}
+      {/* Header */}
       <div className="text-center mb-8">
         <h1 className="text-4xl font-bold text-gray-800 mb-2">Insurer Dashboard</h1>
-        <p className="text-gray-600 text-lg">Review policy requests & issue verifiable credentials.</p>
+        <p className="text-gray-600">Review policy requests and issue verifiable credentials</p>
       </div>
 
-      {/* Toast Notification */}
-      <Toast message={toast?.message} type={toast?.type} onClose={() => setToast(null)} />
-
-      {/* Collapsible: Insurer Credential */}
-      <CollapsibleCard title="Insurer Credential" defaultOpen={false} icon="📄">
+      <div className="card animate-slide-up">
+        <div className="flex items-center mb-6">
+          <div className="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center mr-4">
+            <span className="text-2xl">📄</span>
+          </div>
+          <div>
+            <h2 className="text-2xl font-bold text-gray-800">Insurer Credential</h2>
+            <p className="text-sm text-gray-500">Generate a credential for your insurer DID and share via QR</p>
+          </div>
+        </div>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
             <label className="label">Organization Name</label>
@@ -354,60 +226,23 @@ function InsurerDashboard() {
             )}
           </div>
         </div>
-      </CollapsibleCard>
+      </div>
 
-      {/* Collapsible: Wallet Connection */}
-      <CollapsibleCard title="Wallet Connection" defaultOpen={false}>
-        <div className="space-y-4">
-          {!wallet?.account ? (
-            <div className="space-y-4">
-              <button 
-                className="btn btn-primary w-full sm:w-auto flex items-center justify-center space-x-2"
-                onClick={async () => {
-                  // Trigger wallet connection
-                  if (window.ethereum) {
-                    try {
-                      await window.ethereum.request({ method: 'eth_requestAccounts' });
-                    } catch (error) {
-                      showToast('Failed to connect wallet', 'error');
-                    }
-                  } else {
-                    showToast('Please install MetaMask', 'error');
-                  }
-                }}
-              >
-                <span>🦊</span>
-                <span>Connect MetaMask</span>
-              </button>
-              {!window.ethereum && (
-                <div className="alert alert-info flex items-center space-x-2">
-                  <span>ℹ️</span>
-                  <span>Please install MetaMask extension to connect your wallet.</span>
-                </div>
-              )}
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <div className="bg-green-50 border border-green-200 rounded-lg p-4">
-                <div className="flex items-center space-x-2 mb-2">
-                  <span className="text-green-600">✓</span>
-                  <span className="font-semibold text-green-800">Connected</span>
-                </div>
-                <p className="text-sm text-gray-600 font-mono break-all">{wallet.account}</p>
-              </div>
-              <button 
-                className="btn btn-secondary w-full sm:w-auto"
-                onClick={() => setWallet(null)}
-              >
-                Disconnect Wallet
-              </button>
-            </div>
-          )}
+      {/* Wallet Connection */}
+      <ConnectWallet onWalletConnected={setWallet} />
+
+      {/* Insurer DID Card */}
+      <div className="card animate-slide-up">
+        <div className="flex items-center mb-6">
+          <div className="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center mr-4">
+            <span className="text-2xl">🏢</span>
+          </div>
+          <div>
+            <h2 className="text-2xl font-bold text-gray-800">Insurer Identity</h2>
+            <p className="text-sm text-gray-500">Create your insurer DID</p>
+          </div>
         </div>
-      </CollapsibleCard>
 
-      {/* Collapsible: Insurer Identity */}
-      <CollapsibleCard title="Insurer Identity" defaultOpen={false} icon="🏢">
         {insurerDid ? (
           <div className="bg-gray-50 rounded-lg p-4 border border-gray-200">
             <label className="label">Your Insurer DID</label>
@@ -419,29 +254,27 @@ function InsurerDashboard() {
           <button
             className="btn btn-primary"
             onClick={async () => {
-              if (!wallet?.account) {
-                showToast('Please connect wallet first', 'error');
-                return;
-              }
-
               setLoading(true);
+              setMessage(null);
               try {
+                console.log('Creating Insurer DID...');
                 const result = await createDID();
+                console.log('Insurer DID creation result:', result);
                 if (result && result.success) {
                   setInsurerDid(result.did);
-                  storeDID(wallet.account, 'insurer', result.did);
-                  showToast('Insurer DID created successfully!', 'success');
+                  setMessage({ type: 'success', text: 'Insurer DID created successfully!' });
                 } else {
-                  showToast(result?.error || 'Failed to create DID', 'error');
+                  setMessage({ type: 'error', text: result?.error || 'Failed to create DID' });
                 }
               } catch (error) {
+                console.error('Insurer DID creation error:', error);
                 const errorMessage = error.response?.data?.error || error.message || 'Failed to create DID. Check if backend is running on http://localhost:3001';
-                showToast(errorMessage, 'error');
+                setMessage({ type: 'error', text: errorMessage });
               } finally {
                 setLoading(false);
               }
             }}
-            disabled={loading || !wallet?.account}
+            disabled={loading}
           >
             {loading ? (
               <span className="flex items-center">
@@ -456,231 +289,150 @@ function InsurerDashboard() {
             )}
           </button>
         )}
-      </CollapsibleCard>
+      </div>
 
-      {/* Policy Requests Section - Always Open */}
-      <CollapsibleCard title="Policy Requests" defaultOpen={true} icon="📋">
-        {/* Filter Bar */}
-        <div className="mb-6 space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {/* Status Filter */}
-            <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase mb-2 block">Filter by Status</label>
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-              >
-                <option value="all">All</option>
-                <option value="pending">Pending</option>
-                <option value="approved">Approved</option>
-                <option value="rejected">Rejected</option>
-              </select>
+      {/* Policy Requests Card */}
+      <div className="card animate-slide-up">
+        <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center">
+            <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center mr-4">
+              <span className="text-2xl">📋</span>
             </div>
-
-            {/* Sort Option */}
             <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase mb-2 block">Sort by</label>
-              <select
-                value={sortOption}
-                onChange={(e) => setSortOption(e.target.value)}
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-              >
-                <option value="newest">Newest</option>
-                <option value="oldest">Oldest</option>
-                <option value="coverage">Coverage Amount</option>
-              </select>
+              <h2 className="text-2xl font-bold text-gray-800">Policy Requests</h2>
+              <p className="text-sm text-gray-500">Review and process patient policy requests</p>
             </div>
-
-            {/* Search */}
-            <div>
-              <label className="text-xs font-semibold text-gray-500 uppercase mb-2 block">Search</label>
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Request ID or Patient DID"
-                className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
-              />
-            </div>
+          </div>
+          <div className="bg-primary-50 px-3 py-1 rounded-full">
+            <span className="text-primary-700 font-semibold">{requests.length} Request{requests.length !== 1 ? 's' : ''}</span>
           </div>
         </div>
 
-        {/* Request Count */}
-        <div className="mb-4 text-sm text-gray-600">
-          Showing {paginatedRequests.length} of {filteredRequests.length} request{filteredRequests.length !== 1 ? 's' : ''}
+        <div className="mb-6 p-4 bg-gray-50 rounded-lg border border-gray-200">
+          <label className="flex items-center space-x-3 cursor-pointer">
+            <input
+              type="checkbox"
+              id="createOnchain"
+              checked={createOnchain}
+              onChange={(e) => setCreateOnchain(e.target.checked)}
+              className="w-5 h-5 text-primary-600 border-gray-300 rounded focus:ring-primary-500"
+            />
+            <span className="text-sm font-medium text-gray-700">
+              Create on-chain policy when issuing VC
+            </span>
+          </label>
         </div>
 
-        {/* Request List */}
-        {paginatedRequests.length === 0 ? (
-          <div className="text-center py-12 bg-gray-50 rounded-lg border border-gray-200">
+        {requests.length === 0 ? (
+          <div className="text-center py-12">
             <div className="text-6xl mb-4">📭</div>
-            <p className="text-gray-500 text-lg">No requests found</p>
-            <p className="text-gray-400 text-sm mt-2">
-              {searchQuery || statusFilter !== 'all'
-                ? 'Try adjusting your filters'
-                : 'Requests will appear here when patients submit them'}
-            </p>
+            <p className="text-gray-500 text-lg">No policy requests yet.</p>
+            <p className="text-gray-400 text-sm mt-2">Requests will appear here when patients submit them.</p>
           </div>
         ) : (
           <div className="space-y-4">
-            {paginatedRequests.map((request) => (
-              <div
-                key={request.id}
-                className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 hover:shadow-md transition-shadow"
+            {requests.map((request, index) => (
+              <div 
+                key={request.id} 
+                className="bg-gray-50 rounded-lg p-6 border border-gray-200 hover:border-primary-300 transition-all duration-300 animate-slide-up"
+                style={{ animationDelay: `${index * 0.1}s` }}
               >
                 <div className="flex items-start justify-between mb-4">
-                  <div className="flex-1">
-                    <div className="flex items-center space-x-3 mb-2">
-                      <h3 className="text-lg font-semibold text-gray-800">Request #{request.id}</h3>
-                      {getStatusBadge(request.status)}
+                  <div>
+                    <h3 className="text-xl font-bold text-gray-800 mb-2">
+                      Request #{request.id}
+                    </h3>
+                    <div className={`status-badge status-${request.status}`}>
+                      {request.status}
                     </div>
-                    <p className="text-xs text-gray-500">Created: {formatDate(request.createdAt)}</p>
+                  </div>
+                  <div className="text-sm text-gray-500">
+                    {new Date(request.createdAt).toLocaleString()}
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                   <div>
                     <label className="text-xs font-semibold text-gray-500 uppercase">Patient DID</label>
-                    <p className="font-mono text-xs text-gray-700 break-all mt-1">{request.patientDid || 'N/A'}</p>
+                    <p className="font-mono text-sm text-gray-700 break-all mt-1">{request.patientDid}</p>
                   </div>
                   <div>
-                    <label className="text-xs font-semibold text-gray-500 uppercase">Patient Wallet</label>
-                    <p className="font-mono text-xs text-gray-700 break-all mt-1">{request.patientAddress || 'N/A'}</p>
+                    <label className="text-xs font-semibold text-gray-500 uppercase">Patient Address</label>
+                    <p className="font-mono text-sm text-gray-700 break-all mt-1">{request.patientAddress}</p>
                   </div>
                   <div>
                     <label className="text-xs font-semibold text-gray-500 uppercase">Coverage Amount</label>
-                    <p className="text-sm font-semibold text-primary-600 mt-1">
-                      {weiToEth(request.coverageAmount)} ETH
-                    </p>
+                    <p className="text-sm text-gray-700 font-semibold mt-1">{request.coverageAmount} wei</p>
                   </div>
                 </div>
-
-                {/* Action Buttons */}
-                <div className="flex flex-wrap gap-2 pt-4 border-t border-gray-200">
-                  <button
-                    onClick={() => {
-                      setSelectedRequest(request);
-                      setShowDetailsModal(true);
-                    }}
-                    className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-                  >
-                    View Details
-                  </button>
-                  <button
-                    onClick={() => handleVerifyDID(request.patientDid)}
-                    disabled={loading || !request.patientDid}
-                    className="px-4 py-2 text-sm font-medium text-primary-600 bg-primary-50 hover:bg-primary-100 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    Verify DID
-                  </button>
-                  {request.status === 'pending' && (
-                    <button
-                      onClick={() => {
-                        setSelectedRequest(request);
-                        setShowIssueModal(true);
-                      }}
-                      disabled={loading || !insurerDid}
-                      className="px-4 py-2 text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      Issue VC
-                    </button>
-                  )}
-                  {request.status === 'approved' && (
-                    <>
+                
+                {request.status === 'pending' && (
+                  <div className="mt-4 pt-4 border-t border-gray-200">
+                    {createOnchain ? (
+                      <div className="space-y-3">
+                        <input
+                          type="password"
+                          placeholder="Enter private key for on-chain operations"
+                          id={`privateKey-${request.id}`}
+                          className="input-field"
+                        />
+                        <button
+                          className="btn btn-success w-full"
+                          onClick={() => {
+                            const privateKey = document.getElementById(`privateKey-${request.id}`).value;
+                            handleIssueVCWithOnchain(request, privateKey);
+                          }}
+                          disabled={loading || !insurerDid}
+                        >
+                          {loading ? (
+                            <span className="flex items-center justify-center">
+                              <span className="animate-spin mr-2">⏳</span>
+                              Processing...
+                            </span>
+                          ) : (
+                            <span className="flex items-center justify-center">
+                              <span className="mr-2">✅</span>
+                              Issue VC + Create On-Chain Policy
+                            </span>
+                          )}
+                        </button>
+                      </div>
+                    ) : (
                       <button
-                        onClick={() => {
-                          // View VC functionality
-                          showToast('VC viewing feature coming soon', 'success');
-                        }}
-                        className="px-4 py-2 text-sm font-medium text-primary-600 bg-primary-50 hover:bg-primary-100 rounded-lg transition-colors"
+                        className="btn btn-success w-full"
+                        onClick={() => handleIssueVC(request)}
+                        disabled={loading || !insurerDid}
                       >
-                        View VC
+                        {loading ? (
+                          <span className="flex items-center justify-center">
+                            <span className="animate-spin mr-2">⏳</span>
+                            Processing...
+                          </span>
+                        ) : (
+                          <span className="flex items-center justify-center">
+                            <span className="mr-2">📜</span>
+                            Issue VC
+                          </span>
+                        )}
                       </button>
-                      <button
-                        onClick={() => {
-                          // Download VC functionality
-                          showToast('VC download feature coming soon', 'success');
-                        }}
-                        className="px-4 py-2 text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-                      >
-                        Download VC
-                      </button>
-                    </>
-                  )}
-                </div>
+                    )}
+                  </div>
+                )}
               </div>
             ))}
           </div>
         )}
+      </div>
 
-        {/* Pagination */}
-        {totalPages > 1 && (
-          <div className="mt-6 flex items-center justify-center space-x-2">
-            <button
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-              disabled={currentPage === 1}
-              className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              Prev
-            </button>
-            {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
-              <button
-                key={page}
-                onClick={() => setCurrentPage(page)}
-                className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-                  currentPage === page
-                    ? 'bg-primary-600 text-white'
-                    : 'bg-white text-gray-700 border border-gray-300 hover:bg-gray-50'
-                }`}
-              >
-                {page}
-              </button>
-            ))}
-            <button
-              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-              disabled={currentPage === totalPages}
-              className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              Next
-            </button>
+      {/* Message Alert */}
+      {message && (
+        <div className={`alert ${message.type === 'error' ? 'alert-error' : 'alert-success'} animate-slide-up`}>
+          <div className="flex items-center space-x-2">
+            <span>{message.type === 'error' ? '❌' : '✓'}</span>
+            <span>{message.text}</span>
           </div>
-        )}
-      </CollapsibleCard>
-
-      {/* Issued VCs Section */}
-      <CollapsibleCard title="Issued VCs" defaultOpen={false} icon="📜">
-        <IssuedVCList
-          vcs={issuedVCs}
-          onViewVC={(vc) => {
-            showToast('VC viewing feature coming soon', 'success');
-          }}
-          onDownloadVC={(vc) => {
-            showToast('VC download feature coming soon', 'success');
-          }}
-        />
-      </CollapsibleCard>
-
-      {/* Modals */}
-      <RequestDetailsModal
-        request={selectedRequest}
-        isOpen={showDetailsModal}
-        onClose={() => {
-          setShowDetailsModal(false);
-          setSelectedRequest(null);
-        }}
-      />
-
-      <IssueVCModal
-        request={selectedRequest}
-        isOpen={showIssueModal}
-        onClose={() => {
-          setShowIssueModal(false);
-          setSelectedRequest(null);
-        }}
-        onConfirm={handleIssueVC}
-        loading={loading}
-      />
+        </div>
+      )}
     </div>
   );
 }

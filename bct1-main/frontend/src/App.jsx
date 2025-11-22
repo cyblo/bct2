@@ -49,9 +49,9 @@ function App() {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 animate-fade-in">
-        {activeTab === 'patient' && <PatientDashboard key="patient" />}
-        {activeTab === 'insurer' && <InsurerDashboard key="insurer" />}
-        {activeTab === 'provider' && <ProviderDashboard key="provider" />}
+        {activeTab === 'patient' && <PatientDashboard />}
+        {activeTab === 'insurer' && <InsurerDashboard />}
+        {activeTab === 'provider' && <ProviderDashboard />}
       </main>
     </div>
   );
