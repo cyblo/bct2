@@ -111,5 +111,38 @@ export const issueCredential = async (data) => {
   return response.data;
 };
 
+// Verify DID endpoint
+export const verifyDID = async (did) => {
+  try {
+    const response = await api.get(`/verification/did?did=${encodeURIComponent(did)}`);
+    return response.data;
+  } catch (error) {
+    console.error('❌ API: Verify DID failed', error);
+    throw error;
+  }
+};
+
+// Issue Policy VC endpoint
+export const issuePolicyVC = async (data) => {
+  try {
+    const response = await api.post('/vc/issuePolicyVC', data);
+    return response.data;
+  } catch (error) {
+    console.error('❌ API: Issue Policy VC failed', error);
+    throw error;
+  }
+};
+
+// Get issued VCs
+export const getIssuedVCs = async () => {
+  try {
+    const response = await api.get('/vc/issued');
+    return response.data;
+  } catch (error) {
+    console.error('❌ API: Get issued VCs failed', error);
+    throw error;
+  }
+};
+
 export default api;
 
