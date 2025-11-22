@@ -140,13 +140,17 @@ function ProviderDashboard() {
       };
       const result = await issueCredential(payload);
       
+      // Ensure JWT is a string
+      const jwtString = typeof result.vc === 'string' ? result.vc : JSON.stringify(result.vc);
+      
       const vcData = {
         id: `treatment-vc-${Date.now()}`,
         patientDid: treatmentForm.patientDid,
         treatment: treatmentForm.treatment,
         billAmount: treatmentForm.billAmount,
         cid: result.cid,
-        jwt: result.vc,
+        jwt: jwtString,
+        vc: result.vc, // Store full VC object as well
         createdAt: new Date().toISOString(),
       };
       
@@ -225,9 +229,34 @@ function ProviderDashboard() {
     URL.revokeObjectURL(url);
   };
 
-  const handleCopyJWT = (jwt) => {
-    navigator.clipboard.writeText(jwt);
-    setMessage({ type: 'success', text: 'VC JWT copied to clipboard!' });
+  const handleCopyJWT = async (jwt) => {
+    try {
+      if (!jwt) {
+        setMessage({ type: 'error', text: 'No JWT available to copy' });
+        return;
+      }
+      
+      const jwtString = typeof jwt === 'string' ? jwt : JSON.stringify(jwt);
+      
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(jwtString);
+        setMessage({ type: 'success', text: 'VC JWT copied to clipboard!' });
+      } else {
+        // Fallback for older browsers
+        const textArea = document.createElement('textarea');
+        textArea.value = jwtString;
+        textArea.style.position = 'fixed';
+        textArea.style.opacity = '0';
+        document.body.appendChild(textArea);
+        textArea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textArea);
+        setMessage({ type: 'success', text: 'VC JWT copied to clipboard!' });
+      }
+    } catch (error) {
+      console.error('Failed to copy JWT:', error);
+      setMessage({ type: 'error', text: 'Failed to copy JWT to clipboard' });
+    }
   };
 
   return (
@@ -459,10 +488,10 @@ function ProviderDashboard() {
                   >
                     Download VC JSON
                   </button>
-                  {vc.jwt && (
+                  {(vc.jwt || vc.vc) && (
                     <button
                       className="btn btn-sm btn-secondary"
-                      onClick={() => handleCopyJWT(vc.jwt)}
+                      onClick={() => handleCopyJWT(vc.jwt || vc.vc)}
                     >
                       Copy JWT
                     </button>
@@ -525,13 +554,21 @@ function ProviderDashboard() {
 
       {/* VC View Modal */}
       {selectedVC && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-auto">
-            <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex items-center justify-between">
+        <div 
+          className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setSelectedVC(null);
+            }
+          }}
+        >
+          <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-auto shadow-xl">
+            <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex items-center justify-between z-10">
               <h3 className="text-xl font-bold text-gray-800">Treatment VC Details</h3>
               <button
-                className="text-gray-500 hover:text-gray-700 text-2xl"
+                className="text-gray-500 hover:text-gray-700 text-2xl font-bold w-8 h-8 flex items-center justify-center rounded hover:bg-gray-100"
                 onClick={() => setSelectedVC(null)}
+                aria-label="Close modal"
               >
                 ×
               </button>
@@ -547,11 +584,11 @@ function ProviderDashboard() {
               </div>
               <div>
                 <label className="label">Treatment</label>
-                <p className="text-sm bg-gray-50 p-2 rounded">{selectedVC.treatment}</p>
+                <p className="text-sm bg-gray-50 p-2 rounded">{selectedVC.treatment || 'N/A'}</p>
               </div>
               <div>
                 <label className="label">Bill Amount</label>
-                <p className="text-sm bg-gray-50 p-2 rounded">{selectedVC.billAmount} ETH</p>
+                <p className="text-sm bg-gray-50 p-2 rounded">{selectedVC.billAmount || '0'} ETH</p>
               </div>
               {selectedVC.cid && (
                 <div>
@@ -562,22 +599,30 @@ function ProviderDashboard() {
               {selectedVC.jwt && (
                 <div>
                   <label className="label">VC JWT</label>
-                  <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto max-h-40 break-all">
-                    {selectedVC.jwt}
+                  <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto max-h-40 break-all border border-gray-200">
+                    {typeof selectedVC.jwt === 'string' ? selectedVC.jwt : JSON.stringify(selectedVC.jwt, null, 2)}
                   </pre>
                 </div>
               )}
-              <div className="flex gap-2 pt-2">
+              {selectedVC.vc && !selectedVC.jwt && (
+                <div>
+                  <label className="label">VC Data</label>
+                  <pre className="text-xs bg-gray-50 p-2 rounded overflow-auto max-h-40 break-all border border-gray-200">
+                    {JSON.stringify(selectedVC.vc, null, 2)}
+                  </pre>
+                </div>
+              )}
+              <div className="flex gap-2 pt-2 border-t border-gray-200">
                 <button
                   className="btn btn-secondary"
                   onClick={() => handleDownloadVC(selectedVC)}
                 >
                   Download JSON
                 </button>
-                {selectedVC.jwt && (
+                {(selectedVC.jwt || selectedVC.vc) && (
                   <button
                     className="btn btn-secondary"
-                    onClick={() => handleCopyJWT(selectedVC.jwt)}
+                    onClick={() => handleCopyJWT(selectedVC.jwt || selectedVC.vc)}
                   >
                     Copy JWT
                   </button>
