@@ -1,8 +1,10 @@
 import { useState, useEffect } from 'react';
 import { createDID, requestPolicy, issueCredential, getPolicyRequests } from './api';
 import ConnectWallet from './ConnectWallet';
+import CollapsibleCard from './components/CollapsibleCard';
 import QRCode from 'qrcode';
 import { storeDID, getDID } from './did-storage';
+import { formatDate, weiToEth } from './utils/formatting';
 
 function PatientDashboard() {
   const [did, setDid] = useState(null);
@@ -22,6 +24,8 @@ function PatientDashboard() {
   const [showVCSection, setShowVCSection] = useState(false);
   const [showDisconnectPopup, setShowDisconnectPopup] = useState(false);
   const [prevWalletState, setPrevWalletState] = useState(null);
+  const [patientClaims, setPatientClaims] = useState([]);
+  const [loadingClaims, setLoadingClaims] = useState(false);
 
   // Monitor wallet disconnection
   useEffect(() => {
@@ -53,6 +57,15 @@ function PatientDashboard() {
       return () => clearInterval(interval);
     }
   }, [did, wallet?.account]);
+
+  // Load patient claims
+  useEffect(() => {
+    if (wallet?.account) {
+      loadPatientClaims();
+      const interval = setInterval(loadPatientClaims, 10000);
+      return () => clearInterval(interval);
+    }
+  }, [wallet?.account]);
 
   const loadPolicyRequests = async () => {
     try {
@@ -89,6 +102,50 @@ function PatientDashboard() {
     } catch (error) {
       console.error('Error checking for VC:', error);
     }
+  };
+
+  const loadPatientClaims = async () => {
+    if (!wallet?.account) return;
+    
+    setLoadingClaims(true);
+    try {
+      // Try to fetch claims from backend endpoint
+      // If endpoint doesn't exist, this will fail gracefully
+      const response = await fetch(`http://localhost:3001/claims/patient/${wallet.account}`);
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success && result.claims) {
+          setPatientClaims(result.claims);
+        } else {
+          setPatientClaims([]);
+        }
+      } else {
+        // Endpoint doesn't exist yet, set empty array
+        setPatientClaims([]);
+      }
+    } catch (error) {
+      // Endpoint not available, show empty state
+      console.log('Claims endpoint not available yet:', error.message);
+      setPatientClaims([]);
+    } finally {
+      setLoadingClaims(false);
+    }
+  };
+
+  const getStatusColor = (status) => {
+    const statusLower = (status || '').toLowerCase();
+    if (statusLower === 'submitted') return 'bg-gray-100 text-gray-800';
+    if (statusLower === 'underreview' || statusLower === 'under review') return 'bg-blue-100 text-blue-800';
+    if (statusLower === 'approved') return 'bg-green-100 text-green-800';
+    if (statusLower === 'paid') return 'bg-green-200 text-green-900';
+    if (statusLower === 'rejected') return 'bg-red-100 text-red-800';
+    return 'bg-gray-100 text-gray-800';
+  };
+
+  const getStatusLabel = (status) => {
+    const statusLower = (status || '').toLowerCase();
+    if (statusLower === 'underreview') return 'Under Review';
+    return (status || 'Unknown').charAt(0).toUpperCase() + (status || 'Unknown').slice(1).toLowerCase();
   };
 
   const handleCreateDID = async () => {
@@ -543,6 +600,124 @@ function PatientDashboard() {
           </div>
         </div>
       )}
+
+      {/* Claim Status Section */}
+      <CollapsibleCard title="Claim Status" icon="💼" defaultOpen={true}>
+        {loadingClaims ? (
+          <div className="text-center py-8 text-gray-500">
+            <div className="animate-spin text-4xl mb-3">⏳</div>
+            <p>Loading your claim history...</p>
+          </div>
+        ) : patientClaims.length === 0 ? (
+          <div className="text-center py-8 text-gray-500">
+            <div className="text-4xl mb-3">📋</div>
+            <p>No claims have been submitted for you yet.</p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {patientClaims.map((claim, index) => (
+              <div key={claim.claimId || index} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex-1">
+                    <h3 className="font-semibold text-gray-800">Claim #{claim.claimId || `CLAIM-${index + 1}`}</h3>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Created: {claim.createdAt ? formatDate(claim.createdAt) : (claim.submitDate ? formatDate(new Date(Number(claim.submitDate) * 1000)) : 'N/A')}
+                    </p>
+                  </div>
+                  <span className={`px-3 py-1 rounded-full text-xs font-semibold ${getStatusColor(claim.status || claim.state)}`}>
+                    {getStatusLabel(claim.status || claim.state)}
+                  </span>
+                </div>
+                
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm mb-3">
+                  <div>
+                    <span className="text-gray-600">Policy ID:</span>
+                    <p className="font-mono text-gray-800">{claim.policyId || 'N/A'}</p>
+                  </div>
+                  <div>
+                    <span className="text-gray-600">Provider DID:</span>
+                    <p className="font-mono text-xs text-gray-800 break-all">
+                      {claim.providerDid || claim.provider || 'N/A'}
+                    </p>
+                  </div>
+                  <div>
+                    <span className="text-gray-600">Amount:</span>
+                    <p className="font-medium text-gray-800">
+                      {claim.amount ? `${weiToEth(claim.amount)} ETH` : 'N/A'}
+                    </p>
+                  </div>
+                  {claim.txHash && (
+                    <div>
+                      <span className="text-gray-600">Transaction Hash:</span>
+                      <p className="font-mono text-xs text-gray-800 break-all">{claim.txHash}</p>
+                    </div>
+                  )}
+                </div>
+
+                {claim.vcCid && (
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <span className="text-gray-600 text-sm font-semibold mb-2 block">Treatment VC:</span>
+                    <a
+                      href={`https://ipfs.io/ipfs/${claim.vcCid}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-600 hover:text-blue-800 text-sm font-mono break-all"
+                    >
+                      {claim.vcCid}
+                    </a>
+                    <button
+                      className="btn btn-sm btn-primary mt-2"
+                      onClick={() => window.open(`https://ipfs.io/ipfs/${claim.vcCid}`, '_blank')}
+                    >
+                      View Treatment VC
+                    </button>
+                  </div>
+                )}
+
+                {claim.ipfsHash && (
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <span className="text-gray-600 text-sm font-semibold mb-2 block">Supporting Documents (CIDs):</span>
+                    <div className="space-y-1">
+                      {claim.ipfsHash.split(',').map((cid, cidIdx) => (
+                        <div key={cidIdx} className="flex items-center justify-between">
+                          <a
+                            href={`https://ipfs.io/ipfs/${cid.trim()}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 hover:text-blue-800 text-xs font-mono break-all flex-1"
+                          >
+                            {cid.trim()}
+                          </a>
+                          <button
+                            className="btn btn-xs btn-secondary ml-2"
+                            onClick={() => window.open(`https://ipfs.io/ipfs/${cid.trim()}`, '_blank')}
+                          >
+                            View
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {claim.rejectionReason && (
+                  <div className="mt-3 pt-3 border-t border-red-200 bg-red-50 rounded p-2">
+                    <span className="text-red-800 text-sm font-semibold mb-1 block">Rejection Reason:</span>
+                    <p className="text-sm text-red-700">{claim.rejectionReason}</p>
+                  </div>
+                )}
+
+                {claim.insurerMessage && (
+                  <div className="mt-3 pt-3 border-t border-gray-200 bg-blue-50 rounded p-2">
+                    <span className="text-blue-800 text-sm font-semibold mb-1 block">Insurer Message:</span>
+                    <p className="text-sm text-blue-700">{claim.insurerMessage}</p>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </CollapsibleCard>
 
       {/* MetaMask Disconnect Popup */}
       {showDisconnectPopup && (

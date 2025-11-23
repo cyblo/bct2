@@ -1,9 +1,10 @@
-import { useState } from 'react';
-import { createDID, issueCredential, uploadFile, onchainSubmitClaim, getVCByPolicyId } from './api';
+import { useState, useEffect } from 'react';
+import { createDID, issueCredential, uploadFile, uploadFileMultipart, submitClaim, getProviderClaims, getIdentityByWallet, getVCByPolicyId } from './api';
 import ConnectWallet from './ConnectWallet';
 import CollapsibleCard from './components/CollapsibleCard';
+import UploadedFileList from './components/UploadedFileList';
 import QRCode from 'qrcode';
-import { formatDate } from './utils/formatting';
+import { formatDate, weiToEth } from './utils/formatting';
 
 function ProviderDashboard() {
   const [wallet, setWallet] = useState(null);
@@ -31,13 +32,65 @@ function ProviderDashboard() {
     amount: '',
     fileCids: '',
   });
+  const [claimUploadedFiles, setClaimUploadedFiles] = useState([]);
+  const [uploadingFile, setUploadingFile] = useState(false);
+  const [didChecked, setDidChecked] = useState(false);
 
   // Issued VCs and Claims state
   const [issuedVCs, setIssuedVCs] = useState([]);
   const [submittedClaims, setSubmittedClaims] = useState([]);
   const [viewingVC, setViewingVC] = useState(null);
+  const [loadingClaims, setLoadingClaims] = useState(false);
+
+  // Check DID when wallet connects
+  useEffect(() => {
+    const checkExistingDID = async () => {
+      if (wallet?.account && !didChecked) {
+        setDidChecked(true);
+        try {
+          const result = await getIdentityByWallet(wallet.account);
+          if (result.ok && result.did) {
+            setDid(result.did);
+            setMessage({ type: 'success', text: 'DID found for this wallet' });
+          }
+        } catch (error) {
+          console.log('No existing DID found or error checking:', error.message);
+        }
+      } else if (!wallet?.account) {
+        setDidChecked(false);
+        setDid(null);
+      }
+    };
+    checkExistingDID();
+  }, [wallet?.account, didChecked]);
+
+  // Load provider claims
+  useEffect(() => {
+    if (wallet?.account) {
+      loadProviderClaims();
+    }
+  }, [wallet?.account]);
+
+  const loadProviderClaims = async () => {
+    if (!wallet?.account) return;
+    setLoadingClaims(true);
+    try {
+      const result = await getProviderClaims(wallet.account);
+      if (result.ok && result.claims) {
+        setSubmittedClaims(result.claims);
+      }
+    } catch (error) {
+      console.error('Error loading provider claims:', error);
+    } finally {
+      setLoadingClaims(false);
+    }
+  };
 
   const handleCreateDID = async () => {
+    if (did) {
+      setMessage({ type: 'error', text: 'DID already exists for this wallet' });
+      return;
+    }
     setLoading(true);
     setMessage(null);
     try {
@@ -180,6 +233,66 @@ function ProviderDashboard() {
     }
   };
 
+  // File upload for claim submission
+  const handleClaimFileChange = async (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+    
+    setUploadingFile(true);
+    setMessage(null);
+    
+    // Upload each file sequentially
+    for (const file of files) {
+      try {
+        const result = await uploadFileMultipart(file);
+        if (result.ok && result.cid) {
+          setClaimUploadedFiles(prev => {
+            const updated = [...prev, {
+              cid: result.cid,
+              name: file.name,
+              size: file.size,
+              includeInClaim: true,
+            }];
+            // Update fileCids with new list
+            const includedCids = updated
+              .filter(f => f.includeInClaim !== false)
+              .map(f => f.cid)
+              .join(',');
+            setClaimForm(prev => ({ ...prev, fileCids: includedCids }));
+            return updated;
+          });
+        } else {
+          setMessage({ type: 'error', text: result.error || `Failed to upload ${file.name}` });
+        }
+      } catch (error) {
+        setMessage({ type: 'error', text: `Failed to upload ${file.name}: ${error.message}` });
+      }
+    }
+    
+    setUploadingFile(false);
+    // Clear file input
+    e.target.value = '';
+  };
+
+  const handleToggleFileInclude = (index, include) => {
+    setClaimUploadedFiles(prev => {
+      const updated = [...prev];
+      updated[index] = { ...updated[index], includeInClaim: include };
+      // Update fileCids
+      const includedCids = updated
+        .filter(f => f.includeInClaim !== false)
+        .map(f => f.cid)
+        .join(',');
+      setClaimForm(prev => ({ ...prev, fileCids: includedCids }));
+      return updated;
+    });
+  };
+
+  const handleCopyCid = (cid) => {
+    navigator.clipboard.writeText(cid);
+    setMessage({ type: 'success', text: 'CID copied to clipboard!' });
+  };
+
   // Claim Submission handler
   const handleSubmitClaim = async () => {
     if (!wallet?.account) {
@@ -190,16 +303,20 @@ function ProviderDashboard() {
       setMessage({ type: 'error', text: 'Please fill all required fields' });
       return;
     }
+    if (parseFloat(claimForm.amount) <= 0) {
+      setMessage({ type: 'error', text: 'Amount must be greater than 0' });
+      return;
+    }
+    
     setLoading(true);
     setMessage(null);
     try {
-      // Get VC by policy ID
-      let vcCid = '';
+      // Get VC by policy ID (optional)
+      let treatmentVcCid = '';
       try {
         const vcResult = await getVCByPolicyId(claimForm.policyId);
         if (vcResult.success && vcResult.vc) {
-          // Extract CID from VC if available
-          vcCid = vcResult.vc.cid || '';
+          treatmentVcCid = vcResult.vc.cid || '';
         }
       } catch (vcError) {
         console.warn('Could not fetch VC:', vcError);
@@ -207,35 +324,33 @@ function ProviderDashboard() {
 
       // Convert ETH to wei
       const amountWei = (parseFloat(claimForm.amount) * 1e18).toString();
-      const fileCidsArray = claimForm.fileCids.split(',').map(cid => cid.trim()).filter(cid => cid);
+      
+      // Get file CIDs from uploaded files
+      const fileCids = claimUploadedFiles
+        .filter(f => f.includeInClaim !== false)
+        .map(f => f.cid);
 
-      // Use first CID as IPFS hash, or combine them
-      const ipfsHash = fileCidsArray.length > 0 ? fileCidsArray[0] : '';
-
-      const result = await onchainSubmitClaim({
+      const payload = {
+        providerWallet: wallet.account,
+        patientDidOrWallet: claimForm.patientWalletOrDid,
         policyId: claimForm.policyId,
-        beneficiary: claimForm.patientWalletOrDid.startsWith('0x') 
-          ? claimForm.patientWalletOrDid 
-          : wallet.account, // Use wallet if DID provided
-        insurer: wallet.account, // This should be fetched from policy, but using wallet for now
-        ipfsHash: ipfsHash,
-        vcCid: vcCid,
-        amount: amountWei,
-      });
+        amountWei,
+        fileCids,
+        treatmentVcCid: treatmentVcCid || undefined,
+      };
 
-      if (result.success) {
-        setMessage({ type: 'success', text: `Claim submitted successfully! Claim ID: ${result.claimId}` });
-        // Add to submitted claims
-        setSubmittedClaims([...submittedClaims, {
-          claimId: result.claimId,
-          patientDid: claimForm.patientWalletOrDid,
-          amount: claimForm.amount,
-          status: 'Submitted',
-          txHash: result.txHash || 'N/A',
-          createdAt: new Date().toISOString(),
-        }]);
+      const result = await submitClaim(payload);
+
+      if (result.ok) {
+        setMessage({ 
+          type: 'success', 
+          text: `Claim submitted — claimId: ${result.claimId}, txHash: ${result.txHash || 'N/A'}` 
+        });
+        // Reload claims
+        await loadProviderClaims();
         // Reset form
         setClaimForm({ patientWalletOrDid: '', policyId: '', amount: '', fileCids: '' });
+        setClaimUploadedFiles([]);
       } else {
         setMessage({ type: 'error', text: result.error || 'Failed to submit claim' });
       }
@@ -324,11 +439,21 @@ function ProviderDashboard() {
             <p className="font-mono text-sm text-gray-700 break-all bg-white p-3 rounded border border-gray-200">
               {did}
             </p>
+            <p className="text-xs text-green-600 mt-2">✓ DID created</p>
           </div>
         ) : (
-          <button className="btn btn-primary" onClick={handleCreateDID} disabled={loading}>
-            {loading ? 'Creating DID...' : 'Create Provider DID'}
-          </button>
+          <div className="space-y-2">
+            <button 
+              className="btn btn-primary" 
+              onClick={handleCreateDID} 
+              disabled={loading || !wallet?.account}
+            >
+              {loading ? 'Creating DID...' : 'Create Provider DID'}
+            </button>
+            {!wallet?.account && (
+              <p className="text-xs text-gray-500">Please connect wallet first</p>
+            )}
+          </div>
         )}
       </CollapsibleCard>
 
@@ -517,22 +642,32 @@ function ProviderDashboard() {
             />
           </div>
           <div>
-            <label className="label">File CIDs (comma-separated)</label>
+            <label className="label">Upload Supporting Documents</label>
+            <div className="flex items-center space-x-2">
+              <input
+                type="file"
+                multiple
+                className="input-field flex-1"
+                onChange={handleClaimFileChange}
+                disabled={uploadingFile}
+              />
+              {uploadingFile && (
+                <span className="text-sm text-gray-500">Uploading...</span>
+              )}
+            </div>
+            <UploadedFileList
+              files={claimUploadedFiles}
+              onToggleInclude={handleToggleFileInclude}
+              onCopyCid={handleCopyCid}
+            />
+            {/* Hidden fallback input for manual CID entry */}
             <input
               type="text"
-              className="input-field"
+              className="input-field mt-2 hidden"
               value={claimForm.fileCids}
               onChange={(e) => setClaimForm({ ...claimForm, fileCids: e.target.value })}
-              placeholder="Qm..., Qm... (or use CIDs from uploaded documents above)"
+              placeholder="Manual CID entry (hidden)"
             />
-            {treatmentFileCids.length > 0 && (
-              <button
-                className="btn btn-sm btn-secondary mt-2"
-                onClick={() => setClaimForm({ ...claimForm, fileCids: treatmentFileCids.join(', ') })}
-              >
-                Use Uploaded CIDs
-              </button>
-            )}
           </div>
           <button
             className="btn btn-primary"
@@ -592,47 +727,87 @@ function ProviderDashboard() {
 
       {/* Claims Submitted by Provider Section */}
       <CollapsibleCard title="Claims Submitted by Provider" icon="💼" defaultOpen={true}>
-        {submittedClaims.length === 0 ? (
+        {loadingClaims ? (
+          <div className="text-center py-8 text-gray-500">
+            <div className="animate-spin text-2xl mb-2">⏳</div>
+            <p>Loading claims...</p>
+          </div>
+        ) : submittedClaims.length === 0 ? (
           <div className="text-center py-8 text-gray-500">
             <p>No claims submitted yet</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full border-collapse">
-              <thead>
-                <tr className="bg-gray-100">
-                  <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">Claim ID</th>
-                  <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">Patient DID</th>
-                  <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">Amount (ETH)</th>
-                  <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">Status</th>
-                  <th className="border border-gray-300 px-4 py-2 text-left text-sm font-semibold">TxHash</th>
-                </tr>
-              </thead>
-              <tbody>
-                {submittedClaims.map((claim, idx) => (
-                  <tr key={idx} className="hover:bg-gray-50">
-                    <td className="border border-gray-300 px-4 py-2 text-sm">{claim.claimId}</td>
-                    <td className="border border-gray-300 px-4 py-2 text-sm font-mono text-xs break-all max-w-xs">
-                      {claim.patientDid}
-                    </td>
-                    <td className="border border-gray-300 px-4 py-2 text-sm">{claim.amount}</td>
-                    <td className="border border-gray-300 px-4 py-2 text-sm">
-                      <span className={`px-2 py-1 rounded text-xs font-semibold ${
-                        claim.status === 'Submitted' ? 'bg-yellow-100 text-yellow-800' :
-                        claim.status === 'Approved' ? 'bg-green-100 text-green-800' :
-                        claim.status === 'Rejected' ? 'bg-red-100 text-red-800' :
-                        'bg-gray-100 text-gray-800'
-                      }`}>
-                        {claim.status}
-                      </span>
-                    </td>
-                    <td className="border border-gray-300 px-4 py-2 text-sm font-mono text-xs break-all max-w-xs">
-                      {claim.txHash}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="space-y-4">
+            {submittedClaims.map((claim, idx) => (
+              <div key={claim.claimId || idx} className="bg-gray-50 rounded-lg p-4 border border-gray-200">
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex-1">
+                    <h4 className="font-semibold text-gray-800">Claim #{claim.claimId || `CLAIM-${idx + 1}`}</h4>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {claim.createdAt ? formatDate(claim.createdAt) : 'N/A'}
+                    </p>
+                  </div>
+                  <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${
+                    claim.status === 'submitted' || claim.status === 'Submitted' ? 'bg-yellow-100 text-yellow-800' :
+                    claim.status === 'onchainPending' ? 'bg-blue-100 text-blue-800' :
+                    claim.status === 'confirmed' || claim.status === 'Approved' ? 'bg-green-100 text-green-800' :
+                    claim.status === 'rejected' || claim.status === 'Rejected' ? 'bg-red-100 text-red-800' :
+                    'bg-gray-100 text-gray-800'
+                  }`}>
+                    {claim.status || 'Unknown'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm mb-3">
+                  <div>
+                    <span className="text-gray-600">Policy ID:</span>
+                    <p className="font-mono text-xs text-gray-800">{claim.policyId || 'N/A'}</p>
+                  </div>
+                  <div>
+                    <span className="text-gray-600">Patient DID/Wallet:</span>
+                    <p className="font-mono text-xs text-gray-800 break-all">{claim.patientDid || claim.patientWalletOrDid || 'N/A'}</p>
+                  </div>
+                  <div>
+                    <span className="text-gray-600">Amount:</span>
+                    <p className="font-semibold text-gray-800">
+                      {claim.amount ? (typeof claim.amount === 'string' && claim.amount.includes('e') 
+                        ? weiToEth(claim.amount) 
+                        : claim.amount) : 'N/A'} ETH
+                    </p>
+                  </div>
+                  {claim.txHash && claim.txHash !== 'N/A' && (
+                    <div>
+                      <span className="text-gray-600">Transaction:</span>
+                      <a
+                        href={`https://sepolia.etherscan.io/tx/${claim.txHash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 hover:text-blue-800 text-xs font-mono break-all block"
+                      >
+                        {claim.txHash.substring(0, 10)}...
+                      </a>
+                    </div>
+                  )}
+                </div>
+                {claim.fileCids && claim.fileCids.length > 0 && (
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <span className="text-xs font-semibold text-gray-600 uppercase mb-2 block">Attachments</span>
+                    <div className="flex flex-wrap gap-2">
+                      {(Array.isArray(claim.fileCids) ? claim.fileCids : claim.fileCids.split(',')).map((cid, cidIdx) => (
+                        <a
+                          key={cidIdx}
+                          href={`https://ipfs.io/ipfs/${cid.trim()}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-blue-600 hover:text-blue-800 font-mono"
+                        >
+                          {cid.trim().substring(0, 10)}...
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </CollapsibleCard>

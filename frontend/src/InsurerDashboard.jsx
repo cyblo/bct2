@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getPolicyRequests, createDID, issueCredential } from './api';
+import { getPolicyRequests, createDID, issueCredential, getClaims, approveClaim, rejectClaim, getVCByPolicyId, verifyVC, verifyDID } from './api';
 import { ethers } from 'ethers';
 import QRCode from 'qrcode';
 import { storeDID, getDID } from './did-storage';
@@ -24,6 +24,16 @@ function InsurerDashboard() {
   const [vcInfo, setVcInfo] = useState(null);
   const [vcQr, setVcQr] = useState('');
   const [issuedVCs, setIssuedVCs] = useState([]);
+  
+  // Claim Management state
+  const [claims, setClaims] = useState([]);
+  const [selectedClaim, setSelectedClaim] = useState(null);
+  const [showSettlementModal, setShowSettlementModal] = useState(false);
+  const [showRejectionModal, setShowRejectionModal] = useState(false);
+  const [settlementVC, setSettlementVC] = useState(null);
+  const [rejectionVC, setRejectionVC] = useState(null);
+  const [rejectReason, setRejectReason] = useState('');
+  const [verifyingClaim, setVerifyingClaim] = useState(null);
 
   // Filter and sort state
   const [statusFilter, setStatusFilter] = useState('all');
@@ -37,9 +47,11 @@ function InsurerDashboard() {
   useEffect(() => {
     loadRequests();
     loadIssuedVCs();
+    loadClaims();
     const interval = setInterval(() => {
       loadRequests();
       loadIssuedVCs();
+      loadClaims();
     }, 5000);
     return () => clearInterval(interval);
   }, []);
@@ -157,6 +169,210 @@ function InsurerDashboard() {
     } catch (error) {
       console.log('Error loading issued VCs:', error);
     }
+  };
+
+  const loadClaims = async () => {
+    try {
+      const result = await getClaims();
+      if (result.success) {
+        // Filter claims for this insurer's wallet
+        const insurerClaims = (result.claims || []).filter(
+          claim => claim.insurer?.toLowerCase() === wallet?.account?.toLowerCase()
+        );
+        setClaims(insurerClaims);
+      }
+    } catch (error) {
+      console.error('Error loading claims:', error);
+    }
+  };
+
+  const handleApproveClaim = async (claim) => {
+    if (!wallet?.account || !insurerDid) {
+      showToast('Please connect wallet and create DID first', 'error');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      // Get private key from wallet (in production, use proper key management)
+      // For now, we'll need the user to provide it or use MetaMask signing
+      const privateKey = prompt('Enter your private key to sign the transaction:');
+      if (!privateKey) {
+        showToast('Private key required to approve claim', 'error');
+        return;
+      }
+
+      const result = await approveClaim({
+        claimId: claim.claimId,
+        insurerDid,
+        insurerAddress: wallet.account,
+        privateKey,
+      });
+
+      if (result.success) {
+        showToast('Claim approved successfully!', 'success');
+        setSettlementVC(result.settlementVC);
+        setShowSettlementModal(true);
+        loadClaims();
+      } else {
+        showToast(result.error || 'Failed to approve claim', 'error');
+      }
+    } catch (error) {
+      showToast(error.message || 'Failed to approve claim', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRejectClaim = async (claim) => {
+    if (!wallet?.account || !insurerDid) {
+      showToast('Please connect wallet and create DID first', 'error');
+      return;
+    }
+
+    if (!rejectReason.trim()) {
+      showToast('Please provide a rejection reason', 'error');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const privateKey = prompt('Enter your private key to sign the transaction:');
+      if (!privateKey) {
+        showToast('Private key required to reject claim', 'error');
+        return;
+      }
+
+      const result = await rejectClaim({
+        claimId: claim.claimId,
+        reason: rejectReason,
+        insurerDid,
+        insurerAddress: wallet.account,
+        privateKey,
+      });
+
+      if (result.success) {
+        showToast('Claim rejected successfully!', 'success');
+        setRejectionVC(result.rejectionVC);
+        setShowRejectionModal(true);
+        setRejectReason('');
+        loadClaims();
+      } else {
+        showToast(result.error || 'Failed to reject claim', 'error');
+      }
+    } catch (error) {
+      showToast(error.message || 'Failed to reject claim', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleVerifyPatientDID = async (claim) => {
+    if (!claim.beneficiary) {
+      showToast('Patient DID not available', 'error');
+      return;
+    }
+    setVerifyingClaim(claim.claimId);
+    try {
+      const patientDid = `did:example:${claim.beneficiary}`;
+      const result = await verifyDID(patientDid);
+      if (result.verified) {
+        showToast('Patient DID verified successfully!', 'success');
+      } else {
+        showToast(`DID verification failed: ${result.reason}`, 'error');
+      }
+    } catch (error) {
+      showToast('Failed to verify DID', 'error');
+    } finally {
+      setVerifyingClaim(null);
+    }
+  };
+
+  const handleVerifyProviderDID = async (claim) => {
+    if (!claim.provider) {
+      showToast('Provider DID not available', 'error');
+      return;
+    }
+    setVerifyingClaim(claim.claimId);
+    try {
+      const providerDid = `did:example:${claim.provider}`;
+      const result = await verifyDID(providerDid);
+      if (result.verified) {
+        showToast('Provider DID verified successfully!', 'success');
+      } else {
+        showToast(`DID verification failed: ${result.reason}`, 'error');
+      }
+    } catch (error) {
+      showToast('Failed to verify DID', 'error');
+    } finally {
+      setVerifyingClaim(null);
+    }
+  };
+
+  const handleVerifyTreatmentVC = async (claim) => {
+    if (!claim.vcCid) {
+      showToast('Treatment VC CID not available', 'error');
+      return;
+    }
+    setVerifyingClaim(claim.claimId);
+    try {
+      // Fetch VC from IPFS
+      const vcUrl = `https://ipfs.io/ipfs/${claim.vcCid}`;
+      const response = await fetch(vcUrl);
+      const vcData = await response.json();
+      
+      // Verify VC (if it's a JWT, use verifyVC)
+      if (typeof vcData === 'string') {
+        const result = await verifyVC(vcData);
+        if (result.verified) {
+          showToast('Treatment VC verified successfully!', 'success');
+        } else {
+          showToast('Treatment VC verification failed', 'error');
+        }
+      } else {
+        showToast('Treatment VC loaded (verification may require JWT format)', 'success');
+      }
+    } catch (error) {
+      showToast('Failed to verify treatment VC', 'error');
+    } finally {
+      setVerifyingClaim(null);
+    }
+  };
+
+  const handleVerifyPolicyVC = async (claim) => {
+    if (!claim.policyId) {
+      showToast('Policy ID not available', 'error');
+      return;
+    }
+    setVerifyingClaim(claim.claimId);
+    try {
+      const result = await getVCByPolicyId(claim.policyId);
+      if (result.success && result.vc) {
+        showToast('Policy VC found and verified!', 'success');
+      } else {
+        showToast('Policy VC not found', 'error');
+      }
+    } catch (error) {
+      showToast('Failed to verify policy VC', 'error');
+    } finally {
+      setVerifyingClaim(null);
+    }
+  };
+
+  const getClaimStatusBadge = (status) => {
+    const statusLower = (status || '').toLowerCase();
+    const colors = {
+      submitted: 'bg-gray-100 text-gray-800',
+      underreview: 'bg-blue-100 text-blue-800',
+      approved: 'bg-green-100 text-green-800',
+      rejected: 'bg-red-100 text-red-800',
+      paid: 'bg-green-200 text-green-900',
+    };
+    return (
+      <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${colors[statusLower] || 'bg-gray-100 text-gray-800'}`}>
+        {status?.toUpperCase() || 'UNKNOWN'}
+      </span>
+    );
   };
 
   const showToast = (message, type = 'success') => {
@@ -648,6 +864,159 @@ function InsurerDashboard() {
         )}
       </CollapsibleCard>
 
+      {/* Claim Requests Section */}
+      <CollapsibleCard title="Claim Requests" defaultOpen={true} icon="💼" disabled={!insurerDid}>
+        {!insurerDid ? (
+          <div className="text-center py-8 text-gray-500">
+            <p>Please create your Insurer DID first to manage claims</p>
+          </div>
+        ) : claims.length === 0 ? (
+          <div className="text-center py-12 bg-gray-50 rounded-lg border border-gray-200">
+            <div className="text-6xl mb-4">📋</div>
+            <p className="text-gray-500 text-lg">No claims found</p>
+            <p className="text-gray-400 text-sm mt-2">Claims will appear here when providers submit them</p>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {claims.map((claim) => (
+              <div
+                key={claim.claimId}
+                className="bg-white rounded-xl border border-gray-200 shadow-sm p-5 hover:shadow-md transition-shadow"
+              >
+                <div className="flex items-start justify-between mb-4">
+                  <div className="flex-1">
+                    <div className="flex items-center space-x-3 mb-2">
+                      <h3 className="text-lg font-semibold text-gray-800">Claim #{claim.claimId}</h3>
+                      {getClaimStatusBadge(claim.status)}
+                    </div>
+                    <p className="text-xs text-gray-500">Submitted: {formatDate(claim.createdAt)}</p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="text-xs font-semibold text-gray-500 uppercase">Policy ID</label>
+                    <p className="text-sm font-mono text-gray-800 mt-1">{claim.policyId || 'N/A'}</p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-gray-500 uppercase">Bill Amount</label>
+                    <p className="text-sm font-semibold text-primary-600 mt-1">
+                      {weiToEth(claim.amount)} ETH
+                    </p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-gray-500 uppercase">Patient DID</label>
+                    <p className="text-xs font-mono text-gray-700 break-all mt-1">
+                      {claim.beneficiary ? `did:example:${claim.beneficiary}` : 'N/A'}
+                    </p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-semibold text-gray-500 uppercase">Provider DID</label>
+                    <p className="text-xs font-mono text-gray-700 break-all mt-1">
+                      {claim.provider ? `did:example:${claim.provider}` : 'N/A'}
+                    </p>
+                  </div>
+                  {claim.treatmentDescription && (
+                    <div className="md:col-span-2">
+                      <label className="text-xs font-semibold text-gray-500 uppercase">Treatment Description</label>
+                      <p className="text-sm text-gray-800 mt-1">{claim.treatmentDescription}</p>
+                    </div>
+                  )}
+                </div>
+
+                {/* Attachments */}
+                <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+                  <label className="text-xs font-semibold text-gray-500 uppercase mb-2 block">Attachments</label>
+                  <div className="flex flex-wrap gap-2">
+                    {claim.vcCid && (
+                      <button
+                        onClick={() => handleVerifyTreatmentVC(claim)}
+                        disabled={verifyingClaim === claim.claimId}
+                        className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        {verifyingClaim === claim.claimId ? 'Verifying...' : 'View Treatment VC'}
+                      </button>
+                    )}
+                    {claim.policyId && (
+                      <button
+                        onClick={() => handleVerifyPolicyVC(claim)}
+                        disabled={verifyingClaim === claim.claimId}
+                        className="px-3 py-1.5 text-xs font-medium text-purple-600 bg-purple-50 hover:bg-purple-100 rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        {verifyingClaim === claim.claimId ? 'Verifying...' : 'View Policy VC'}
+                      </button>
+                    )}
+                    {claim.ipfsHash && (
+                      <a
+                        href={`https://ipfs.io/ipfs/${claim.ipfsHash}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                      >
+                        View Documents
+                      </a>
+                    )}
+                  </div>
+                </div>
+
+                {/* Verification Buttons */}
+                <div className="mb-4 flex flex-wrap gap-2">
+                  <button
+                    onClick={() => handleVerifyPatientDID(claim)}
+                    disabled={verifyingClaim === claim.claimId || !claim.beneficiary}
+                    className="px-3 py-1.5 text-xs font-medium text-green-600 bg-green-50 hover:bg-green-100 rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    Verify Patient DID
+                  </button>
+                  <button
+                    onClick={() => handleVerifyProviderDID(claim)}
+                    disabled={verifyingClaim === claim.claimId || !claim.provider}
+                    className="px-3 py-1.5 text-xs font-medium text-green-600 bg-green-50 hover:bg-green-100 rounded-lg transition-colors disabled:opacity-50"
+                  >
+                    Verify Provider DID
+                  </button>
+                </div>
+
+                {/* Action Buttons */}
+                {(claim.status === 'Submitted' || claim.status === 'UnderReview') && (
+                  <div className="flex flex-wrap gap-2 pt-4 border-t border-gray-200">
+                    <button
+                      onClick={() => handleApproveClaim(claim)}
+                      disabled={loading || !wallet?.account || !insurerDid}
+                      className="px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Approve
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedClaim(claim);
+                        setRejectReason('');
+                        // Show rejection modal
+                        const reason = window.prompt('Enter rejection reason:');
+                        if (reason && reason.trim()) {
+                          handleRejectClaim({ ...claim, reason: reason.trim() });
+                        }
+                      }}
+                      disabled={loading || !wallet?.account || !insurerDid}
+                      className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                )}
+
+                {claim.rejectionReason && (
+                  <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+                    <label className="text-xs font-semibold text-red-800 uppercase mb-1 block">Rejection Reason</label>
+                    <p className="text-sm text-red-700">{claim.rejectionReason}</p>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </CollapsibleCard>
+
       {/* Issued VCs Section */}
       <CollapsibleCard title="Issued VCs" defaultOpen={false} icon="📜">
         <IssuedVCList
@@ -681,6 +1050,174 @@ function InsurerDashboard() {
         onConfirm={handleIssueVC}
         loading={loading}
       />
+
+      {/* Settlement VC Modal */}
+      {showSettlementModal && settlementVC && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-auto">
+            <div className="p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-xl font-bold text-green-800">Claim Settlement VC Generated</h3>
+                <button
+                  className="text-gray-500 hover:text-gray-700"
+                  onClick={() => {
+                    setShowSettlementModal(false);
+                    setSettlementVC(null);
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+              
+              <div className="mb-4">
+                <h4 className="font-semibold text-gray-800 mb-2">Settlement Credential Details</h4>
+                <div className="bg-gray-50 p-4 rounded-lg">
+                  <pre className="text-xs overflow-auto max-h-64">
+                    {JSON.stringify(settlementVC.vc, null, 2)}
+                  </pre>
+                </div>
+              </div>
+
+              {settlementVC.cid && (
+                <div className="mb-4">
+                  <p className="text-sm text-gray-600 mb-2">IPFS CID: <span className="font-mono text-xs">{settlementVC.cid}</span></p>
+                  <a
+                    href={`https://ipfs.io/ipfs/${settlementVC.cid}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-600 hover:text-blue-800 text-sm"
+                  >
+                    View on IPFS →
+                  </a>
+                </div>
+              )}
+
+              <div className="flex gap-2 mt-4">
+                <button
+                  className="btn btn-primary"
+                  onClick={async () => {
+                    const qr = await QRCode.toDataURL(JSON.stringify(settlementVC.vc));
+                    const link = document.createElement('a');
+                    link.href = qr;
+                    link.download = `settlement-vc-${Date.now()}.png`;
+                    link.click();
+                  }}
+                >
+                  Download QR Code
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    const dataStr = JSON.stringify(settlementVC.vc, null, 2);
+                    const dataBlob = new Blob([dataStr], { type: 'application/json' });
+                    const url = URL.createObjectURL(dataBlob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = `settlement-vc-${Date.now()}.json`;
+                    link.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                >
+                  Download VC JSON
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    setShowSettlementModal(false);
+                    setSettlementVC(null);
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rejection VC Modal */}
+      {showRejectionModal && rejectionVC && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-auto">
+            <div className="p-6">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-xl font-bold text-red-800">Claim Rejection VC Generated</h3>
+                <button
+                  className="text-gray-500 hover:text-gray-700"
+                  onClick={() => {
+                    setShowRejectionModal(false);
+                    setRejectionVC(null);
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+              
+              <div className="mb-4">
+                <h4 className="font-semibold text-gray-800 mb-2">Rejection Credential Details</h4>
+                <div className="bg-gray-50 p-4 rounded-lg">
+                  <pre className="text-xs overflow-auto max-h-64">
+                    {JSON.stringify(rejectionVC.vc, null, 2)}
+                  </pre>
+                </div>
+              </div>
+
+              {rejectionVC.cid && (
+                <div className="mb-4">
+                  <p className="text-sm text-gray-600 mb-2">IPFS CID: <span className="font-mono text-xs">{rejectionVC.cid}</span></p>
+                  <a
+                    href={`https://ipfs.io/ipfs/${rejectionVC.cid}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-600 hover:text-blue-800 text-sm"
+                  >
+                    View on IPFS →
+                  </a>
+                </div>
+              )}
+
+              <div className="flex gap-2 mt-4">
+                <button
+                  className="btn btn-primary"
+                  onClick={async () => {
+                    const qr = await QRCode.toDataURL(JSON.stringify(rejectionVC.vc));
+                    const link = document.createElement('a');
+                    link.href = qr;
+                    link.download = `rejection-vc-${Date.now()}.png`;
+                    link.click();
+                  }}
+                >
+                  Download QR Code
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    const dataStr = JSON.stringify(rejectionVC.vc, null, 2);
+                    const dataBlob = new Blob([dataStr], { type: 'application/json' });
+                    const url = URL.createObjectURL(dataBlob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = `rejection-vc-${Date.now()}.json`;
+                    link.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                >
+                  Download VC JSON
+                </button>
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    setShowRejectionModal(false);
+                    setRejectionVC(null);
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

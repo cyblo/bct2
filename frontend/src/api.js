@@ -81,6 +81,60 @@ export const uploadFile = async (data, filename) => {
   return response.data;
 };
 
+// Upload file as multipart form data (converts to base64 for compatibility)
+export const uploadFileMultipart = async (file) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const base64Data = e.target.result.split(',')[1] || e.target.result;
+        const response = await api.post('/file/upload', { 
+          data: base64Data,
+          filename: file.name 
+        });
+        resolve(response.data);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+};
+
+// Get identity by wallet address
+export const getIdentityByWallet = async (walletAddress) => {
+  try {
+    const response = await api.get(`/identity/byWallet/${walletAddress}`);
+    return response.data;
+  } catch (error) {
+    console.error('❌ API: Get identity by wallet failed', error);
+    throw error;
+  }
+};
+
+// Submit claim
+export const submitClaim = async (data) => {
+  try {
+    const response = await api.post('/claims/submit', data);
+    return response.data;
+  } catch (error) {
+    console.error('❌ API: Submit claim failed', error);
+    throw error;
+  }
+};
+
+// Get claims by provider wallet
+export const getProviderClaims = async (walletAddress) => {
+  try {
+    const response = await api.get(`/claims/provider/${walletAddress}`);
+    return response.data;
+  } catch (error) {
+    console.error('❌ API: Get provider claims failed', error);
+    throw error;
+  }
+};
+
 export const getFile = async (cid) => {
   const response = await api.get(`/file/${cid}`);
   return response.data;
@@ -140,6 +194,39 @@ export const getIssuedVCs = async () => {
     return response.data;
   } catch (error) {
     console.error('❌ API: Get issued VCs failed', error);
+    throw error;
+  }
+};
+
+// Get all claims
+export const getClaims = async () => {
+  try {
+    const response = await api.get('/claims');
+    return response.data;
+  } catch (error) {
+    console.error('❌ API: Get claims failed', error);
+    throw error;
+  }
+};
+
+// Approve claim
+export const approveClaim = async (data) => {
+  try {
+    const response = await api.post('/claims/approve', data);
+    return response.data;
+  } catch (error) {
+    console.error('❌ API: Approve claim failed', error);
+    throw error;
+  }
+};
+
+// Reject claim
+export const rejectClaim = async (data) => {
+  try {
+    const response = await api.post('/claims/reject', data);
+    return response.data;
+  } catch (error) {
+    console.error('❌ API: Reject claim failed', error);
     throw error;
   }
 };
